@@ -56,9 +56,23 @@
 #define RCSwitchDisableReceiving
 #endif
 
+// Number of preallocated bytes to handle array data
+#define RCSwitchMaximumByteNumber 8 
+#if RCSwitchMaximumByteNumber  < 4 // We assume the unsigned long size is 4 bytes
+#define RCSwitchMaximumByteNumber 4
+#endif
+
+// Number of preallocated bits to handle array data
+#define RCSwitchMaximumBitsNumber RCSwitchMaximumByteNumber * 8
+
 // Number of maximum high/Low changes per packet.
 // We can handle up to (unsigned long) => 32 bit * 2 H/L changes per bit + 2 for sync
-#define RCSWITCH_MAX_CHANGES 67
+#define RCSWITCH_MAX_CHANGES RCSwitchMaximumBitsNumber * 2 + 2
+
+// Define if the library handles unsigned long long values
+#if RCSwitchMaximumByteNumber  >= 8 // We assume the unsigned long long size is 8 bytes
+#define RCSwitchEnableULL
+#endif
 
 class RCSwitch {
 
@@ -79,7 +93,9 @@ class RCSwitch {
     void sendTriState(const char* sCodeWord);
     void send(unsigned long code, unsigned int length);
     void send(const char* sCodeWord);
-    
+    void sendString(const char* string);
+    void send(const byte (&data)[RCSwitchMaximumByteNumber], unsigned int length);
+
     #if not defined( RCSwitchDisableReceiving )
     void enableReceive(int interrupt);
     void enableReceive();
@@ -89,9 +105,11 @@ class RCSwitch {
 
     unsigned long getReceivedValue();
     unsigned int getReceivedBitlength();
+    void getReceivedString(char *dst_string, size_t length);
     unsigned int getReceivedDelay();
     unsigned int getReceivedProtocol();
     unsigned int* getReceivedRawdata();
+    unsigned long long getReceivedLongLongValue();
     #endif
   
     void enableTransmit(int nTransmitterPin);
@@ -103,6 +121,18 @@ class RCSwitch {
     #endif
 
     /**
+    * This structure allows to handle different types of data as a single bit set
+    */
+    union rc_data {
+      unsigned long ul_value;
+      #ifdef RCSwitchEnableULL
+      unsigned long long ull_value;
+      #endif
+      float fl_value;
+      byte ba_value[RCSwitchMaximumByteNumber];
+      char ch_value[RCSwitchMaximumByteNumber];
+    };
+     /**
      * Description of a single pule, which consists of a high signal
      * whose duration is "high" times the base pulse length, followed
      * by a low signal lasting "low" times the base pulse length.
@@ -158,6 +188,7 @@ class RCSwitch {
     #if not defined( RCSwitchDisableReceiving )
     static void handleInterrupt();
     static bool receiveProtocol(const int p, unsigned int changeCount);
+    static void adjustReceivedCode(byte (&code)[RCSwitchMaximumByteNumber], const int bits);
     int nReceiverInterrupt;
     #endif
     int nTransmitterPin;
@@ -167,7 +198,8 @@ class RCSwitch {
 
     #if not defined( RCSwitchDisableReceiving )
     static int nReceiveTolerance;
-    volatile static unsigned long nReceivedValue;
+    volatile static rc_data nReceivedValue;
+    volatile static bool hasReceivedValue;
     volatile static unsigned int nReceivedBitlength;
     volatile static unsigned int nReceivedDelay;
     volatile static unsigned int nReceivedProtocol;

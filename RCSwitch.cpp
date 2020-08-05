@@ -14,6 +14,7 @@
   - Johann Richard / <first name>.<last name>(at)gmail(dot)com
   - Vlad Gheorghe / <first name>.<last name>(at)gmail(dot)com https://github.com/vgheo
   - Matias Cuenca-Acuna 
+  - Cristobal Lopez / crolopezp@gmail.com https://github.com/crolopez
   
   Project home: https://github.com/sui77/rc-switch/
 
@@ -98,7 +99,8 @@ enum {
 };
 
 #if not defined( RCSwitchDisableReceiving )
-volatile unsigned long RCSwitch::nReceivedValue = 0;
+volatile RCSwitch::rc_data RCSwitch::nReceivedValue;
+volatile bool RCSwitch::hasReceivedValue = false;
 volatile unsigned int RCSwitch::nReceivedBitlength = 0;
 volatile unsigned int RCSwitch::nReceivedDelay = 0;
 volatile unsigned int RCSwitch::nReceivedProtocol = 0;
@@ -117,7 +119,7 @@ RCSwitch::RCSwitch() {
   #if not defined( RCSwitchDisableReceiving )
   this->nReceiverInterrupt = -1;
   this->setReceiveTolerance(60);
-  RCSwitch::nReceivedValue = 0;
+  resetAvailable();
   #endif
 }
 
@@ -478,16 +480,36 @@ void RCSwitch::sendTriState(const char* sCodeWord) {
  * @param sCodeWord   a binary code word consisting of the letter 0, 1
  */
 void RCSwitch::send(const char* sCodeWord) {
-  // turn the tristate code word into the corresponding bit pattern, then send it
-  unsigned long code = 0;
-  unsigned int length = 0;
-  for (const char* p = sCodeWord; *p; p++) {
-    code <<= 1L;
-    if (*p != '0')
-      code |= 1L;
-    length++;
+  size_t str_size = strlen(sCodeWord);
+  if (str_size > RCSwitchMaximumBitsNumber)
+    return;
+
+  rc_data data;	
+  memset(&data, 0, sizeof(RCSwitch::rc_data));
+  for (int i = 0; i < str_size; i++) {
+    if (sCodeWord[str_size - 1 - i] == '1') {
+      data.ba_value[i / 8] |= 1 << i % 8;
+    }
   }
-  this->send(code, length);
+  this->send(data.ba_value, str_size);
+}
+
+/**
+ * @param string   a character array which must end in '\0'
+ */
+void RCSwitch::sendString(const char* string) {
+  size_t str_size = strlen(string);
+  if (str_size > RCSwitchMaximumByteNumber)
+    return;
+	
+  rc_data str_data;
+  memset(&str_data, 0, sizeof(RCSwitch::rc_data));
+
+  for (int i = 0; i < str_size; i++) {
+    str_data.ch_value[i] = string[i];
+  }
+
+  this->send(str_data.ba_value, str_size * 8);
 }
 
 /**
@@ -496,6 +518,22 @@ void RCSwitch::send(const char* sCodeWord) {
  * then the bit at position length-2, and so on, till finally the bit at position 0.
  */
 void RCSwitch::send(unsigned long code, unsigned int length) {
+  if (length > RCSwitchMaximumBitsNumber)
+    return;
+  
+  rc_data data;	
+  memset(&data, 0, sizeof(RCSwitch::rc_data));
+  data.ul_value = code;
+
+  this->send(data.ba_value, length);
+}
+
+/**
+ * Transmit the first 'length' bits of the data structure 'data'. The
+ * bits are sent from MSB to LSB, i.e., first the bit at position length-1,
+ * then the bit at position length-2, and so on, till finally the bit at position 0.
+ */
+ void RCSwitch::send(const byte (&data)[RCSwitchMaximumByteNumber], unsigned int length) { 
   if (this->nTransmitterPin == -1)
     return;
 
@@ -507,9 +545,14 @@ void RCSwitch::send(unsigned long code, unsigned int length) {
   }
 #endif
 
+  int filler_bits = length > 32 ? length % 8 : 0;
   for (int nRepeat = 0; nRepeat < nRepeatTransmit; nRepeat++) {
+    for (int j = 0; filler_bits && j < 8 - filler_bits; j++) {
+      this->transmit(protocol.zero);
+    }
+	  
     for (int i = length-1; i >= 0; i--) {
-      if (code & (1L << i))
+      if (data[i / 8] & (1 << i % 8))
         this->transmit(protocol.one);
       else
         this->transmit(protocol.zero);
@@ -553,7 +596,7 @@ void RCSwitch::enableReceive(int interrupt) {
 
 void RCSwitch::enableReceive() {
   if (this->nReceiverInterrupt != -1) {
-    RCSwitch::nReceivedValue = 0;
+    this->resetAvailable();
     RCSwitch::nReceivedBitlength = 0;
 #if defined(RaspberryPi) // Raspberry Pi
     wiringPiISR(this->nReceiverInterrupt, INT_EDGE_BOTH, &handleInterrupt);
@@ -574,19 +617,35 @@ void RCSwitch::disableReceive() {
 }
 
 bool RCSwitch::available() {
-  return RCSwitch::nReceivedValue != 0;
+  return RCSwitch::hasReceivedValue;
 }
 
 void RCSwitch::resetAvailable() {
-  RCSwitch::nReceivedValue = 0;
+  memset((void *)  &RCSwitch::nReceivedValue, 0, sizeof(RCSwitch::rc_data));
+  hasReceivedValue = false;
 }
 
 unsigned long RCSwitch::getReceivedValue() {
-  return RCSwitch::nReceivedValue;
+  return RCSwitch::nReceivedValue.ul_value;
 }
 
 unsigned int RCSwitch::getReceivedBitlength() {
   return RCSwitch::nReceivedBitlength;
+}
+
+/**
+* @param dst_string   destionation string
+* @param length		  memory allocated for dst_string (including '\0')
+* The returned value must be released 
+*/
+void RCSwitch::getReceivedString(char *dst_string, size_t length) {
+  if (length > RCSwitchMaximumByteNumber + 1) {
+    *dst_string = '\0';
+    return;
+  }
+	
+  strncpy(dst_string, (const char *) RCSwitch::nReceivedValue.ch_value, length - 1);
+  dst_string[length - 1] = '\0';
 }
 
 unsigned int RCSwitch::getReceivedDelay() {
@@ -599,6 +658,14 @@ unsigned int RCSwitch::getReceivedProtocol() {
 
 unsigned int* RCSwitch::getReceivedRawdata() {
   return RCSwitch::timings;
+}
+
+unsigned long long RCSwitch::getReceivedLongLongValue() {
+#ifdef RCSwitchEnableULL
+  return RCSwitch::nReceivedValue.ull_value;
+#else
+  return 0;
+#endif
 }
 
 /* helper function for the receiveProtocol method */
@@ -617,7 +684,8 @@ bool RECEIVE_ATTR RCSwitch::receiveProtocol(const int p, unsigned int changeCoun
     memcpy_P(&pro, &proto[p-1], sizeof(Protocol));
 #endif
 
-    unsigned long code = 0;
+    RCSwitch::rc_data code;
+    memset(&code, 0, sizeof(RCSwitch::rc_data));
     //Assuming the longer pulse length is the pulse captured in timings[0]
     const unsigned int syncLengthInPulses =  ((pro.syncFactor.low) > (pro.syncFactor.high)) ? (pro.syncFactor.low) : (pro.syncFactor.high);
     const unsigned int delay = RCSwitch::timings[0] / syncLengthInPulses;
@@ -642,15 +710,15 @@ bool RECEIVE_ATTR RCSwitch::receiveProtocol(const int p, unsigned int changeCoun
      */
     const unsigned int firstDataTiming = (pro.invertedSignal) ? (2) : (1);
 
-    for (unsigned int i = firstDataTiming; i < changeCount - 1; i += 2) {
-        code <<= 1;
+    int received_bits = 0;ceived_bits = 0;
+    for (unsigned int i = firstDataTiming; i < changeCount - 1 && received_bits < RCSwitchMaximumBitsNumber; i += 2, received_bits++) {
         if (diff(RCSwitch::timings[i], delay * pro.zero.high) < delayTolerance &&
             diff(RCSwitch::timings[i + 1], delay * pro.zero.low) < delayTolerance) {
             // zero
         } else if (diff(RCSwitch::timings[i], delay * pro.one.high) < delayTolerance &&
                    diff(RCSwitch::timings[i + 1], delay * pro.one.low) < delayTolerance) {
             // one
-            code |= 1;
+            code.ba_value[received_bits / 8] |= 1 << 7 - received_bits % 8;
         } else {
             // Failed
             return false;
@@ -658,7 +726,9 @@ bool RECEIVE_ATTR RCSwitch::receiveProtocol(const int p, unsigned int changeCoun
     }
 
     if (changeCount > 7) {    // ignore very short transmissions: no device sends them, so this must be noise
-        RCSwitch::nReceivedValue = code;
+        adjustReceivedCode(code.ba_value, received_bits);
+        memcpy((void *) &RCSwitch::nReceivedValue, &code, sizeof(RCSwitch::rc_data));
+        RCSwitch::hasReceivedValue = true;
         RCSwitch::nReceivedBitlength = (changeCount - 1) / 2;
         RCSwitch::nReceivedDelay = delay;
         RCSwitch::nReceivedProtocol = p;
@@ -666,6 +736,22 @@ bool RECEIVE_ATTR RCSwitch::receiveProtocol(const int p, unsigned int changeCoun
     }
 
     return false;
+}
+
+/**
+ * Sort a received code
+ */
+void RCSwitch::adjustReceivedCode(byte (&code)[RCSwitchMaximumByteNumber], const int bits) {
+	int remaining = bits % 8;
+	if (remaining) {
+		code[0] >>= 8 - remaining; // Adjust the remaining bits of the first (last) block	
+	}
+	
+	for (int i = 0, j = bits / 8 - (remaining ? 0 : 1); i < j; i++, j--) {
+		byte copy = code[i];
+		code[i] = code[j];
+		code[j] = copy;
+	}
 }
 
 void RECEIVE_ATTR RCSwitch::handleInterrupt() {
